@@ -1,0 +1,54 @@
+# Python Environment
+venv/
+.venv/
+ENV/
+env/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+pip-log.txt
+pip-delete-this-directory.txt
+.ipynb_checkpoints/
+
+
+idea.md
+PLAN.md
+# Node.js Environment
+dashboard/frontend/node_modules/
+dashboard/frontend/build/
+dashboard/frontend/.pnp
+dashboard/frontend/.pnp.js
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Database & Generated/Uploaded Claim Data
+data/ledger.db
+data/ledger.db-journal
+data/crops/
+data/forged/
+data/calibration/
+*.db
+*.sqlite3
+
+# IDE / System files
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Logs & Packages
+*.log
+*.zip
+*.tar.gz
+dist/
+build/
