@@ -72,6 +72,7 @@ flowchart TD
 5. *Your run result:* **0 bonds HOLD, 2 bonds BROKEN**. The Verifier determined that the crop contents did not support the claims or failed the controls, demonstrating the safety mechanism in action to prevent false fraud accusations!
 
 ---
+<img width="1917" height="1032" alt="Screenshot 2026-08-01 235443" src="https://github.com/user-attachments/assets/6d344769-b896-4466-a0b1-1ade894217ff" />
 
 ## 4. Project Directory Structure
 ```
@@ -127,3 +128,7 @@ npm install
 npm start
 ```
 *App will launch on `http://localhost:3000`*
+
+## 6. Team
+Harshdip Saha and Anshika Singh
+
