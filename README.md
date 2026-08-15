@@ -1,7 +1,7 @@
 # VERDICT — Evidence-Bonded Reasoning
 ### *An AI Auditor for Images Submitted as Proof. It cannot make a claim it cannot prove.*
 
-**AI Arena 3.0 · Theme: AI Vision · 100% Software · Active Agent Workspace**
+**Theme: AI Vision · 100% Software · Active Agent Workspace**
 
 ---
 
