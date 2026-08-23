@@ -30,7 +30,12 @@ COST = {"zoom": 1.0, "ela": 1.0, "dct_quant": 1.0, "noise_residual": 2.0,
         "font_metrics": 1.0, "copy_move": 2.0, "block_grid": 1.0, "cross_field": 0.0,
         "exif_audit": 0.0, "perceptual_hash": 0.0}
 
-MAX_REGIONS = 14
+MAX_REGIONS = 18
+# Residual outliers are plentiful (any busy page produces a dozen), so they
+# get a quota rather than the whole budget. Without one they crowd the money
+# amounts out of the region list entirely - and amounts are where forgeries
+# actually live, so a selection that never probes them cannot detect anything.
+MAX_OUTLIER_REGIONS = 6
 
 
 def _card_id(n: int) -> str:
@@ -73,7 +78,7 @@ def propose_anomaly_regions(emap, vmap, refs, page, energy=None) -> list[dict]:
         scored.append((score, b))
     scored.sort(key=lambda s: -s[0])
     return [{"bbox": list(b), "why": f"residual_outlier(z={s:.1f})"}
-            for s, b in scored[:MAX_REGIONS] if s >= 2.0]
+            for s, b in scored[:MAX_OUTLIER_REGIONS] if s >= 2.0]
 
 
 def select_regions(img_bgr, page, triage: dict, target_bbox=None,
@@ -81,9 +86,11 @@ def select_regions(img_bgr, page, triage: dict, target_bbox=None,
     """Choose where to spend the budget, most informative first.
 
     The arithmetic target comes first because it is the only region the system
-    can already name a motive for. Pixel outliers come next, because they do
-    not depend on the tampered text remaining legible. Amounts follow, since
-    they are what forgers edit.
+    can already name a motive for. Dead-grain patches come next - an erased
+    field appears in no OCR box and no amount list, so if it is not
+    prioritised here it is never probed at all, and it must survive the
+    MAX_REGIONS cut that the (plentiful) residual outliers would otherwise
+    fill. Pixel outliers and amounts follow.
     """
     regions: list[dict] = []
     seen: set[tuple] = set()
@@ -98,6 +105,14 @@ def select_regions(img_bgr, page, triage: dict, target_bbox=None,
     if target_bbox:
         push(target_bbox, "arithmetic_target")
 
+    # NOTE deliberately absent: a dead-grain (erase-fill) proposal path was
+    # built and measured here, and removed. On real scanned receipts,
+    # JPEG compression produces natural grain-dead patches on content rows
+    # whose grain ratio (0.07-0.41 of paper median) brackets a genuine erase
+    # fill (0.22) - the same regions fired identically on forged images and
+    # their authentic originals. The probe survives as
+    # noise.dead_grain_regions for high-quality inputs and diagnostics, but
+    # its proposals cannot be allowed to generate claims on compressed scans.
     for r in propose_anomaly_regions(emap, vmap, refs or [], page, energy):
         push(r["bbox"], r["why"])
 
@@ -114,7 +129,7 @@ def select_regions(img_bgr, page, triage: dict, target_bbox=None,
 
 
 def process_probes(image_path: str, claim_id: str, ledger, cal,
-                   triage: dict | None = None, budget: float = 90.0) -> dict:
+                   triage: dict | None = None, budget: float = 150.0) -> dict:
     """Run the forensic suite and register one evidence card per region."""
     p = str(pathlib.Path(image_path))
     img = cv2.imread(p)

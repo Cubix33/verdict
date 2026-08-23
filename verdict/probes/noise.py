@@ -125,6 +125,104 @@ def flatness(img_bgr: np.ndarray, bbox) -> dict:
             "flat_pixel_frac": round(float((grad < 2.0).mean()), 4)}
 
 
+def dead_grain_regions(img_bgr: np.ndarray, exclude_bboxes=None,
+                       grain_fraction: float = 0.4, min_px: int = 300,
+                       max_regions: int = 3) -> list[dict]:
+    """Regions of paper with no grain - the footprint of an erase fill.
+
+    Scanned or photographed paper always carries sensor grain: measured on
+    real receipts the local 5x5 standard deviation of blank paper sits around
+    4-6 grey levels. A field that was flood-filled with a sampled background
+    colour has almost none (~0.8 on the same page). This scans for
+    paper-coloured pixels whose grain is far below the page's own paper
+    median - a per-document relative test, so it ships no absolute threshold.
+
+    This scan exists because erasures are invisible to every other proposal
+    path: an erased field has no OCR text, so it appears in no text box and
+    no amount list, and block-level statistics dilute a word-sized patch
+    against its neighbours. The most anomalous region on the page was the one
+    place nothing ever looked.
+
+    MEASURED LIMITATION - read before wiring this into claim generation. On
+    already-JPEG-compressed scans, compression itself produces natural
+    grain-dead patches on content rows whose grain ratio (measured 0.07-0.41
+    of the paper median across authentic SROIE receipts) brackets a genuine
+    erase fill (0.22) - and identical regions fire on forged images and
+    their authentic originals alike. The Prober therefore does NOT use these
+    proposals; they are only trustworthy on high-quality inputs (phone
+    photos, PNGs) where paper grain is strong and uncompressed.
+    """
+    g = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY) if img_bgr.ndim == 3 else img_bgr
+    f = g.astype(np.float32)
+    mean = cv2.boxFilter(f, -1, (5, 5), normalize=True)
+    sq = cv2.boxFilter(f * f, -1, (5, 5), normalize=True)
+    local_std = np.sqrt(np.maximum(sq - mean * mean, 0.0))
+
+    thr, _ = cv2.threshold(g, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    paper = g > thr
+    if not paper.any():
+        return []
+    grain = float(np.median(local_std[paper]))
+    if grain < 1e-3:
+        return []              # synthetic image: everything is flat, nothing stands out
+
+    dead = ((local_std < grain_fraction * grain) & paper).astype(np.uint8)
+    dead = cv2.morphologyEx(dead, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    if not dead.any():
+        return []
+
+    n_comp, comp, cstats, _ = cv2.connectedComponentsWithStats(dead)
+    H, W = g.shape[:2]
+
+    # Erasures happen where the content is. Scanner output legitimately has
+    # grainless strips at the page borders (the scanner lid, software white
+    # fill), so a candidate must sit inside the area the text actually spans.
+    if exclude_bboxes:
+        span = [min(b[0] for b in exclude_bboxes), min(b[1] for b in exclude_bboxes),
+                max(b[2] for b in exclude_bboxes), max(b[3] for b in exclude_bboxes)]
+    else:
+        span = [0, 0, W, H]
+
+    out = []
+    for c in range(1, n_comp):
+        x, y, w, h, area = cstats[c]
+        if area < min_px or w < 20 or h < 10:
+            # JPEG legitimately flattens thin blank strips between printed
+            # sections; a filled FIELD is a solid block with the footprint of
+            # a word. Requiring field-like dimensions is what separates them.
+            continue
+        if w >= 0.9 * W or h >= 0.9 * H:
+            continue           # page-scale artefact, not a field-sized fill
+        if x <= 4 or y <= 4 or x + w >= W - 4 or y + h >= H - 4:
+            continue           # touches the page border: scanner background
+        bbox = [int(x), int(y), int(x + w), int(y + h)]
+        if not _inside(bbox, span):
+            continue
+        if exclude_bboxes and any(_inside(bbox, b) for b in exclude_bboxes):
+            continue
+        # An erased FIELD sits on a content row: other words share its
+        # vertical band (the item name is still printed; only the amount is
+        # gone). A flat strip BETWEEN rows shares its band with nothing.
+        # This is the difference between "a hole in a line of text" and
+        # "the gap the layout put there".
+        if exclude_bboxes:
+            band = max((min(bbox[3], b[3]) - max(bbox[1], b[1]))
+                       for b in exclude_bboxes)
+            if band < 0.5 * h:
+                continue
+        out.append((int(area), bbox, round(float(
+            np.median(local_std[y:y + h, x:x + w])), 3)))
+    out.sort(key=lambda r: -r[0])
+    return [{"bbox": b, "area_px": a, "grain": s, "paper_grain": round(grain, 3)}
+            for a, b, s in out[:max_regions]]
+
+
+def _inside(bbox, other) -> bool:
+    """Is bbox's centre inside `other`? (loose overlap test for exclusion)"""
+    cx, cy = (bbox[0] + bbox[2]) / 2.0, (bbox[1] + bbox[3]) / 2.0
+    return other[0] <= cx <= other[2] and other[1] <= cy <= other[3]
+
+
 # --- backwards-compatible entry point used by the original code ------------
 def noise_residual(img_bgr: np.ndarray, bbox=None) -> dict:
     res = residual_map(img_bgr)

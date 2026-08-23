@@ -98,6 +98,14 @@ def verify_claim(claim, cards_by_id, ledger, claim_id, cal, img, ctx, rng) -> di
 
     signals = claim.bond_detail.get("signals", [])
     metrics = [SIGNAL_METRIC[s] for s in signals if s in SIGNAL_METRIC]
+    # Re-test each metric at the tier the Adjudicator crossed it at. Checking
+    # a screen-tier claim against the strong bound would break every bond the
+    # two-tier rulebook was added to allow; checking a strong-tier claim
+    # against the screen bound would let it pass a weaker test than it claimed.
+    tiers = claim.bond_detail.get("tiers", {})
+
+    def _tier(m: str) -> str:
+        return tiers.get(m, "screen")
 
     # --- an arithmetic-only claim is re-derived from the numbers ----------
     if not metrics:
@@ -119,7 +127,7 @@ def verify_claim(claim, cards_by_id, ledger, claim_id, cal, img, ctx, rng) -> di
     for m in metrics:
         v = _measure(img, bbox, refs, ctx, m)
         observed[m] = None if v is None else round(float(v), 4)
-        if v is not None and cal.exceeds(m, v):
+        if v is not None and cal.exceeds(m, v, tier=_tier(m)):
             reproduced.append(m)
     detail["recomputed"] = observed
     detail["checks"]["reproduction"] = bool(reproduced)
@@ -135,8 +143,16 @@ def verify_claim(claim, cards_by_id, ledger, claim_id, cal, img, ctx, rng) -> di
     for m in reproduced:
         if m in ("ela_z", "hf_ratio"):
             continue           # relative metrics need peers; grey has none
+        if m == "flat_pixel_frac":
+            # A synthetic grey patch is 100% flat by construction, so it trips
+            # this metric always - which says nothing about whether the CITED
+            # region's flatness is anomalous. Running the control here made
+            # every erasure claim structurally unable to hold; the meaningful
+            # control for flatness is the shuffle below, where the decoys are
+            # real text regions of the same document that must NOT be flat.
+            continue
         v = _measure(grey, [0, 0, grey.shape[1], grey.shape[0]], refs, ctx, m)
-        if v is not None and cal.exceeds(m, v):
+        if v is not None and cal.exceeds(m, v, tier=_tier(m)):
             grey_hits.append(m)
     detail["checks"]["blank_control"] = not grey_hits
     if grey_hits:
@@ -165,7 +181,7 @@ def verify_claim(claim, cards_by_id, ledger, claim_id, cal, img, ctx, rng) -> di
     for rbox in decoys:
         hits = [m for m in reproduced
                 if (v := _measure(img, rbox, refs, ctx, m)) is not None
-                and cal.exceeds(m, v)]
+                and cal.exceeds(m, v, tier=_tier(m))]
         draws.append({"bbox": list(rbox), "hits": hits})
         if hits:
             survivors += 1

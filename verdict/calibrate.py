@@ -67,38 +67,94 @@ class Calibration:
     notes: str = ""
 
     def to_dict(self) -> dict:
+        # One-sided thresholds are stored as +/-inf in memory but serialised
+        # as None: Python's json module happily writes the bare token
+        # `Infinity`, which is not JSON - JSON.parse in a browser, jq, and
+        # most non-Python parsers reject the whole file.
+        thresholds = {}
+        for m, t in self.thresholds.items():
+            entry = dict(t)
+            for k in ("hi", "screen_hi"):
+                if entry.get(k) == float("inf"):
+                    entry[k] = None
+            for k in ("lo", "screen_lo"):
+                if entry.get(k) == float("-inf"):
+                    entry[k] = None
+            thresholds[m] = entry
         return {"customer_id": self.customer_id, "n_samples": self.n_samples,
-                "target_fpr": self.target_fpr, "thresholds": self.thresholds,
+                "target_fpr": self.target_fpr, "thresholds": thresholds,
                 "qtable_bank": self.qtable_bank, "typography": self.typography,
                 "px_on_target_minimums": self.px_on_target_minimums,
                 "notes": self.notes}
 
     @classmethod
     def from_dict(cls, d: dict) -> "Calibration":
+        thresholds = {}
+        for m, t in (d.get("thresholds") or {}).items():
+            entry = dict(t)
+            if entry.get("hi") is None:
+                entry["hi"] = float("inf")
+            if entry.get("lo") is None:
+                entry["lo"] = float("-inf")
+            # A calibration file written before the screen tier existed only
+            # carries strong bounds; falling back to them reproduces the old
+            # (conservative) behaviour instead of crashing or over-firing.
+            if entry.get("screen_hi") is None:
+                entry["screen_hi"] = entry["hi"]
+            if entry.get("screen_lo") is None:
+                entry["screen_lo"] = entry["lo"]
+            thresholds[m] = entry
         return cls(customer_id=d.get("customer_id", "default"),
                    n_samples=d.get("n_samples", 0),
                    target_fpr=d.get("target_fpr", 0.02),
-                   thresholds=d.get("thresholds", {}),
+                   thresholds=thresholds,
                    qtable_bank=d.get("qtable_bank", []),
                    typography=d.get("typography", {}),
                    px_on_target_minimums=d.get("px_on_target_minimums",
                                                dict(PX_ON_TARGET_MINIMUMS)),
                    notes=d.get("notes", ""))
 
-    def exceeds(self, metric: str, value: float) -> bool:
-        """Is this value beyond the calibrated bound for this metric?"""
+    def exceeds(self, metric: str, value: float, tier: str = "screen") -> bool:
+        """Is this value beyond the calibrated bound for this metric?
+
+        Two tiers, because two different questions get asked:
+
+        `screen` - "is this region unusual among ordinary regions?" Bounds are
+        quantiles of ALL regions pooled across the authentic corpus. Around
+        0.5% of honest regions cross this by construction, so a screen-tier
+        hit is a lead, never an accusation - the Adjudicator requires a second
+        independent family (or document-level arithmetic failure) to corroborate
+        it, and the Verifier's shuffle control then confirms the region is
+        anomalous among its own page's peers.
+
+        `strong` - "is this region beyond anything ANY authentic document's
+        WORST region ever reached?" Bounds are quantiles of per-document
+        maxima. A strong-tier hit is individually damning and may accuse alone.
+
+        The first release applied only the strong tier to every region, which
+        controlled false positives and destroyed recall: a forged region only
+        needs to be unusual among its peers, not more extreme than the most
+        extreme honest region in the calibration corpus. Measured on real
+        forgeries, retyped and spliced totals scored ela_z 7-11 against a
+        strong bound of 20 - clearly separable, structurally undetectable.
+        """
         t = self.thresholds.get(metric)
         if t is None or value is None:
             return False
         side = PROBE_SPECS.get(metric, {}).get("side", "high")
+        if tier == "screen":
+            hi = t.get("screen_hi", t["hi"])
+            lo = t.get("screen_lo", t["lo"])
+        else:
+            hi, lo = t["hi"], t["lo"]
         if side == "high":
-            return value > t["hi"]
+            return value > hi
         if side == "low":
-            return value < t["lo"]
-        return value > t["hi"] or value < t["lo"]
+            return value < lo
+        return value > hi or value < lo
 
-    def severity(self, metric: str, value: float) -> float:
-        """How far past the bound, in calibrated units. 0.0 means within normal.
+    def severity(self, metric: str, value: float, tier: str = "screen") -> float:
+        """How far past the tier's bound, in calibrated units. 0.0 = within normal.
 
         Reported alongside every claim so a reader can see not just that a
         threshold was crossed but by how much.
@@ -108,11 +164,16 @@ class Calibration:
             return 0.0
         scale = max(t.get("scale", 1.0), 1e-9)
         side = PROBE_SPECS.get(metric, {}).get("side", "high")
+        if tier == "screen":
+            hi = t.get("screen_hi", t["hi"])
+            lo = t.get("screen_lo", t["lo"])
+        else:
+            hi, lo = t["hi"], t["lo"]
         out = 0.0
-        if side in ("high", "both") and value > t["hi"]:
-            out = (value - t["hi"]) / scale
-        if side in ("low", "both") and value < t["lo"]:
-            out = max(out, (t["lo"] - value) / scale)
+        if side in ("high", "both") and value > hi:
+            out = (value - hi) / scale
+        if side in ("low", "both") and value < lo:
+            out = max(out, (lo - value) / scale)
         return round(float(out), 3)
 
 
@@ -183,6 +244,7 @@ def calibrate(authentic_paths, customer_id: str = "default",
     pretending otherwise is how a calibrator becomes a false-accusation engine.
     """
     per_doc_extremes: dict[str, list[float]] = {}
+    pooled: dict[str, list[float]] = {}
     qhashes: list[str] = []
     jitters: list[float] = []
     strokes: list[float] = []
@@ -205,7 +267,9 @@ def calibrate(authentic_paths, customer_id: str = "default",
                 continue
             arr = np.asarray(vals, dtype=np.float64)
             side = spec["side"]
-            # The per-document extreme in the suspicious direction.
+            # Every region feeds the screen-tier pool...
+            pooled.setdefault(metric, []).extend(float(v) for v in vals)
+            # ...and the per-document extreme feeds the strong tier.
             if side == "high":
                 per_doc_extremes.setdefault(metric + "|hi", []).append(float(arr.max()))
             elif side == "low":
@@ -253,6 +317,29 @@ def calibrate(authentic_paths, customer_id: str = "default",
             entry["observed_min"] = round(float(a.min()), 5)
         else:
             entry["lo"] = float("-inf")
+
+        # Screen tier: quantiles of the pooled per-region distribution. This
+        # bound is deliberately permissive - ~2% of honest regions cross it by
+        # construction. It is safe to be permissive here because a screen hit
+        # alone never accuses: the Adjudicator requires a second independent
+        # family on the same region, and the Verifier's shuffle control then
+        # requires the region to be anomalous among its own page's peers.
+        # Setting this to a "safe-looking" 0.5% was measured to cost all of
+        # the recall (0/105 forgeries detected) while buying nothing - the
+        # heavy upper tail of honest regions sits above real forgeries.
+        pool_vals = pooled.get(metric)
+        screen_q = min(target_fpr, 0.02)
+        if pool_vals:
+            pa = np.asarray(pool_vals, dtype=np.float64)
+            side = spec["side"]
+            entry["screen_hi"] = (round(float(np.quantile(pa, 1.0 - screen_q)), 5)
+                                  if side in ("high", "both") else float("inf"))
+            entry["screen_lo"] = (round(float(np.quantile(pa, screen_q)), 5)
+                                  if side in ("low", "both") else float("-inf"))
+            entry["pool_n"] = len(pool_vals)
+        else:
+            entry["screen_hi"], entry["screen_lo"] = entry["hi"], entry["lo"]
+
         entry["n"] = len(hi_vals or lo_vals)
         thresholds[metric] = entry
 

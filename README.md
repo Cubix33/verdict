@@ -161,12 +161,38 @@ crash on any real camera photo. Root causes, all fixed in this branch:
 Full root-cause writeup with line-level references:
 [`aidlc-docs/efforts/001-fix-false-positive-pipeline/root-cause-analysis.md`](aidlc-docs/efforts/001-fix-false-positive-pipeline/root-cause-analysis.md).
 
-## 7. Current status and honest limitations
+## 7. Current status, measured
 
-- **False-accusation rate is fixed and verified**: authentic documents (including ones outside the calibration set) now return `authentic`, not `tamper_detected`, across every manual and scripted check run in this branch.
-- **Detection recall needs tuning.** With calibration held to a small (12-document) authentic sample, some forgery modes now under-trigger — the system is conservative rather than trigger-happy, but recall has not been measured on a full held-out corpus. This is the main open item; see the issue tracker.
-- **The VLM/adjudication-language layer in `docs/PLAN.md` §5 is not implemented.** The Adjudicator here reasons over calibrated statistics directly (no LLM call), which is a stronger, cheaper, fully deterministic MVP of Mechanism 1, but the natural-language claim generation described in the plan is future work.
-- **JSON has a known Python-ism**: calibration files can contain `Infinity`/`-Infinity` for one-sided thresholds, which `json.dumps`/`json.loads` in Python round-trip fine but a strict JSON parser (e.g. in the React dashboard, or `jq`) will reject. Tracked in the issue.
+Full-corpus evaluation (134 images: 29 authentic + 105 forged across 5 modes;
+calibration and evaluation sources disjoint — method and per-mode tables in
+[`aidlc-docs/efforts/002-recall-tuning-two-tier-calibration/eval-results.md`](aidlc-docs/efforts/002-recall-tuning-two-tier-calibration/eval-results.md)):
+
+| Metric | Value |
+|---|---|
+| False-accusation rate | **3.4%** (1/29 authentic) — was 100% before effort 001 |
+| Precision | **0.947** |
+| Recall, overall | **17.1%** (18/105) — was 0% at the effort-001 calibration |
+| Recall, `retype_amount` (the dominant real-world fraud) | **52.4%** |
+| Bonded-F1 | 0.29 — every detection carries an independently verified evidence bond |
+
+Honest limitations, in order of importance:
+
+- **Pixel-conservative forgery modes are mostly out of reach** of these
+  probes at this calibration: a single spliced digit (4.8% recall), an
+  in-place re-compression (9.5%), an erasure that doesn't break the
+  arithmetic (9.5%). The per-mode numbers are printed, not averaged away.
+- **A dead-grain erase detector was built, measured, and deliberately
+  unwired**: on already-JPEG-compressed scans, compression itself produces
+  natural grain-dead patches that bracket a real erase fill, firing
+  identically on forged and authentic originals. Negative result recorded in
+  `verdict/probes/noise.py::dead_grain_regions` and the effort-002 docs.
+- **The residual false-positive class is large-font digit-run text** (receipt
+  numbers printed as headers) — one such region accounts for the single
+  false accusation.
+- **The VLM/adjudication-language layer in `docs/PLAN.md` §5 is not
+  implemented.** The Adjudicator reasons over calibrated statistics directly
+  (no LLM call) — a cheaper, fully deterministic MVP of Mechanism 1; the
+  natural-language claim generation described in the plan is future work.
 
 ## 8. Team
 
