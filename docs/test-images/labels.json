@@ -1,0 +1,95 @@
+{
+  "authentic/002.jpg": {
+    "label": "authentic",
+    "source": "002.jpg"
+  },
+  "authentic/016.jpg": {
+    "label": "authentic",
+    "source": "016.jpg"
+  },
+  "authentic/bill1.png": {
+    "label": "authentic",
+    "source": "bill1.png"
+  },
+  "authentic/example.png": {
+    "label": "authentic",
+    "source": "example.png"
+  },
+  "forged/002__retype_amount.jpg": {
+    "label": "forged",
+    "source": "002.jpg",
+    "op": "retype_amount",
+    "bbox": [
+      22,
+      565,
+      154,
+      581
+    ],
+    "from": "6935818350846",
+    "to": "18986844830690"
+  },
+  "forged/002__copy_move_amount.jpg": {
+    "label": "forged",
+    "source": "002.jpg",
+    "op": "copy_move_amount",
+    "bbox": [
+      23,
+      439,
+      92,
+      455
+    ],
+    "src_bbox": [
+      383,
+      693,
+      431,
+      709
+    ],
+    "from": "9066468",
+    "to": "33,90"
+  },
+  "forged/002__splice_digit.jpg": {
+    "label": "forged",
+    "source": "002.jpg",
+    "op": "splice_digit",
+    "bbox": [
+      383,
+      714,
+      392,
+      729
+    ],
+    "src_bbox": [
+      22,
+      565,
+      32,
+      581
+    ],
+    "from": "50.00",
+    "to": "leading digit of 6935818350846"
+  },
+  "forged/002__recompress_patch.jpg": {
+    "label": "forged",
+    "source": "002.jpg",
+    "op": "recompress_patch",
+    "bbox": [
+      22,
+      565,
+      154,
+      581
+    ],
+    "from": "6935818350846",
+    "to": "6935818350846 (q45 re-encode)"
+  },
+  "forged/002__erase_field.jpg": {
+    "label": "forged",
+    "source": "002.jpg",
+    "op": "erase_field",
+    "bbox": [
+      383,
+      714,
+      431,
+      729
+    ],
+    "from": "50.00",
+    "to": "(erased)"
+  }
+}
