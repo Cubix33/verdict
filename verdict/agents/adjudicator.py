@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 
+from ..probes.ocr import parse_amount
 from ..types import Claim
 
 # Probes that measure the same physics must not corroborate each other.
@@ -53,31 +54,91 @@ SIGNAL_TEXT = {
     "baseline_exceeds": "baseline is offset from the other words on its row",
 }
 
-# A single signal may accuse only if it is this many calibrated units past the
-# bound. Set high on purpose: one probe alone should almost never be enough.
-SOLO_SEVERITY = 3.0
+METRIC_OF = {"ela_exceeds": "ela_z", "grid_exceeds": "grid_ratio",
+             "hf_exceeds": "hf_ratio", "flat_exceeds": "flat_pixel_frac",
+             "dup_exceeds": "dup_score", "stroke_exceeds": "stroke_ratio",
+             "baseline_exceeds": "baseline_z"}
 
 
-def _families(numeric: dict) -> dict[str, list[str]]:
-    """Group the flags raised on one region by independent probe family."""
-    hit: dict[str, list[str]] = {}
+def _evaluate_region(cal, numeric: dict):
+    """Apply both calibration tiers to a region's raw statistics.
+
+    The Adjudicator re-derives exceedance from the raw values on the card
+    rather than trusting the Prober's `*_exceeds` flags - the flag is a
+    display convenience, and an agent with answer authority should not
+    inherit another agent's thresholding.
+
+    Returns (families_screen, families_strong, tiers) where the families
+    dicts map family -> [signal keys] and tiers maps metric -> the highest
+    tier it crossed ("strong" beats "screen").
+    """
+    fams_screen: dict[str, list[str]] = {}
+    fams_strong: dict[str, list[str]] = {}
+    tiers: dict[str, str] = {}
     for key, family in PROBE_FAMILY.items():
-        if numeric.get(key):
-            hit.setdefault(family, []).append(key)
-    return hit
+        metric = METRIC_OF[key]
+        value = numeric.get(metric)
+        if value is None:
+            continue
+        if cal.exceeds(metric, value, tier="strong"):
+            fams_strong.setdefault(family, []).append(key)
+            fams_screen.setdefault(family, []).append(key)
+            tiers[metric] = "strong"
+        elif cal.exceeds(metric, value, tier="screen"):
+            fams_screen.setdefault(family, []).append(key)
+            tiers[metric] = "screen"
+    return fams_screen, fams_strong, tiers
 
 
-def _severity(cal, numeric: dict, keys: list[str]) -> float:
-    metric_of = {"ela_exceeds": "ela_z", "grid_exceeds": "grid_ratio",
-                 "hf_exceeds": "hf_ratio", "flat_exceeds": "flat_pixel_frac",
-                 "dup_exceeds": "dup_score", "stroke_exceeds": "stroke_ratio",
-                 "baseline_exceeds": "baseline_z"}
+def _severity(cal, numeric: dict, keys: list[str], tier: str = "screen") -> float:
     best = 0.0
     for k in keys:
-        m = metric_of.get(k)
+        m = METRIC_OF.get(k)
         if m and numeric.get(m) is not None:
-            best = max(best, cal.severity(m, numeric[m]))
+            best = max(best, cal.severity(m, numeric[m], tier=tier))
     return round(best, 3)
+
+
+def _is_motivated(card) -> bool:
+    """Would a forger have had a reason to touch this region?
+
+    Forgers edit amounts; they do not redraw the shop's name. The screen-tier
+    corroboration rule therefore only applies to regions where a motive
+    exists: text that parses as a money amount, the field the arithmetic
+    check implicated, or a region the pixel scan nominated that carries no
+    readable text at all (an erased field reads as nothing).
+
+    Header and prose regions can still be accused - but only past the strong
+    tier. Without this distinction the corroboration rule accuses logos and
+    bold headlines, which are the most *legitimately* unusual regions on any
+    receipt: measured on the full corpus, every surviving false positive was
+    a screen-tier two-family claim on decorative text.
+    """
+    params = card.params or {}
+    why = params.get("why") or ""
+    text = (params.get("text") or "").strip()
+    if not text:
+        # Unreadable regions are only motivated when the dead-grain scan
+        # nominated them (an erased field reads as nothing AND has no paper
+        # grain). Any other no-text region is usually a logo or a stamp -
+        # decorative content that is legitimately unusual on every axis.
+        return why.startswith("dead_grain")
+    if parse_amount(text) is not None:
+        return True                      # money amount: the forger's target
+    # A tampered amount often no longer OCRs cleanly ('46881' with the
+    # decimals lost, a retyped total reading as one long digit run) -
+    # requiring a perfect money parse here would exempt precisely the fields
+    # whose glyphs the forger just replaced. Digit-dominated text keeps the
+    # gate open for mangled numbers while still excluding headers and prose,
+    # which read as letters. Long digit runs (phone numbers, till ids) stay
+    # in on purpose: a retyped amount is indistinguishable from them once its
+    # decimal point is lost, and measured on the corpus the length cap that
+    # tried to separate the two blocked a true forgery while letting the one
+    # digit-run false positive through anyway.
+    digits = sum(ch.isdigit() for ch in text)
+    if digits >= 3 and digits >= 0.5 * len(text):
+        return True
+    return why == "arithmetic_target"
 
 
 def adjudicate(cards, cal) -> dict:
@@ -104,7 +165,7 @@ def adjudicate(cards, cal) -> dict:
 
     for card in region_cards:
         num = card.numeric or {}
-        fams = _families(num)
+        fams, fams_strong, tiers = _evaluate_region(cal, num)
         if not fams:
             continue
 
@@ -112,8 +173,12 @@ def adjudicate(cards, cal) -> dict:
         sev = _severity(cal, num, keys)
         text_seen = (card.params or {}).get("text") or ""
 
-        # --- duplication is self-evident and needs no corroboration -------
-        if "duplication" in fams and num.get("dup_distance_px", 0) >= 40:
+        # --- duplication may accuse alone, but only at the strong tier -----
+        # Receipts legitimately repeat short strings ("0.00", "1.00") in the
+        # same font and rasteriser, so screen-tier duplication is ordinary; at
+        # screen tier it counts as one family like everything else. A match
+        # beyond any authentic document's best self-match is another matter.
+        if "duplication" in fams_strong and num.get("dup_distance_px", 0) >= 40:
             n += 1
             claims.append(Claim(
                 id=f"C-{n}",
@@ -121,26 +186,39 @@ def adjudicate(cards, cal) -> dict:
                      f"near-identical copy of another region of this same document",
                 bond=[card.id],
                 bond_detail={"signals": ["dup_exceeds"], "families": ["duplication"],
-                             "severity": sev, "rule": "duplication_single_signal"}))
+                             "severity": _severity(cal, num, ["dup_exceeds"], tier="strong"),
+                             "tiers": tiers, "rule": "duplication_strong_tier"}))
             continue
 
         # --- arithmetic corroborated by a pixel anomaly at the same field --
-        if (arithmetic_card is not None and card.bbox
+        # Duplication cannot be the corroborating family here: printing the
+        # total twice (subtotal line, total line, amount tendered) is the
+        # single most common legitimate receipt layout, so a high dup score
+        # AT the total is expected, not incriminating.
+        arith_fams = {f: ks for f, ks in fams.items() if f != "duplication"}
+        if (arithmetic_card is not None and card.bbox and arith_fams
                 and arithmetic_card.bbox and _overlaps(card.bbox, arithmetic_card.bbox)):
+            arith_keys = [k for ks in arith_fams.values() for k in ks]
             n += 1
-            sig = sorted(fams)
             claims.append(Claim(
                 id=f"C-{n}",
                 text=f"the stated total was altered: the arithmetic does not "
                      f"reconcile and the total field itself shows "
-                     f"{', '.join(SIGNAL_TEXT[k] for k in keys[:2])}",
+                     f"{', '.join(SIGNAL_TEXT[k] for k in arith_keys[:2])}",
                 bond=[card.id, arithmetic_card.id],
-                bond_detail={"signals": keys, "families": sig, "severity": sev,
+                bond_detail={"signals": arith_keys, "families": sorted(arith_fams),
+                             "severity": sev, "tiers": tiers,
                              "rule": "arithmetic_plus_pixel"}))
             continue
 
-        # --- two independent families ---------------------------------------
-        if len(fams) >= 2:
+        # --- two independent families at the screen tier -------------------
+        # Each screen bound passes ~2% of honest regions; two *independent*
+        # families crossing on the same region is what makes this rare enough
+        # to say out loud. Restricted to motivated regions (amounts, the
+        # arithmetic target, unreadable patches) because decorative text -
+        # logos, bold headers - is legitimately unusual on every axis at once
+        # and a forger has no reason to have touched it.
+        if len(fams) >= 2 and _is_motivated(card):
             n += 1
             claims.append(Claim(
                 id=f"C-{n}",
@@ -149,24 +227,31 @@ def adjudicate(cards, cal) -> dict:
                      "; ".join(SIGNAL_TEXT[k] for k in keys[:3]),
                 bond=[card.id],
                 bond_detail={"signals": keys, "families": sorted(fams),
-                             "severity": sev, "rule": "two_independent_families"}))
+                             "severity": sev, "tiers": tiers,
+                             "rule": "two_independent_families"}))
             continue
 
-        # --- one family, but far past the calibrated bound ------------------
-        if sev >= SOLO_SEVERITY:
+        # --- one family, but past the strong (per-document-extreme) tier ---
+        # The strong bound is set on the distribution of each authentic
+        # document's WORST region, so a value past it is beyond anything the
+        # calibration corpus produced even once - individually damning, no
+        # corroboration needed.
+        if fams_strong:
+            strong_keys = [k for ks in fams_strong.values() for k in ks]
             n += 1
             claims.append(Claim(
                 id=f"C-{n}",
                 text=f"the region at {card.bbox} reading '{text_seen}' shows "
-                     f"{SIGNAL_TEXT[keys[0]]}, {sev:.1f} calibrated units past "
-                     f"this customer's authentic range",
+                     f"{SIGNAL_TEXT[strong_keys[0]]}, beyond the worst region of "
+                     f"any document in this customer's authentic corpus",
                 bond=[card.id],
-                bond_detail={"signals": keys, "families": sorted(fams),
-                             "severity": sev, "rule": "single_family_high_severity"}))
+                bond_detail={"signals": strong_keys, "families": sorted(fams_strong),
+                             "severity": _severity(cal, num, strong_keys, tier="strong"),
+                             "tiers": tiers, "rule": "single_family_strong_tier"}))
             continue
 
         reasoning.append(
-            f"{card.id}: {len(fams)} family flagged at severity {sev} - "
+            f"{card.id}: {len(fams)} family at screen tier (severity {sev}) - "
             f"below the corroboration bar, no claim raised")
 
     # --- provenance is reported, never used to accuse of tampering --------

@@ -145,15 +145,41 @@ support, each already compared against this deployment's calibration
 (`numeric["ela_exceeds"]`, etc.) so the Adjudicator never has to see a raw
 image to know a bound was crossed.
 
+### Calibration tiers (`calibrate.py`)
+Every metric carries **two calibrated bounds**, because two different
+questions get asked of it:
+
+- **screen** — *"is this region unusual among ordinary regions?"* Quantiles
+  of ALL regions pooled across the authentic corpus (~2% of honest regions
+  cross by construction). A screen hit is a lead, never an accusation.
+- **strong** — *"is this region beyond anything any authentic document's
+  WORST region ever reached?"* Quantiles of per-document maxima. A strong
+  hit is individually damning.
+
+The first release applied only the strong tier to every region, which
+controlled false positives and destroyed recall: measured on the full corpus,
+0/105 forgeries were detected, because a forged region only needs to be
+unusual among its *peers* (ELA z of 7–11 on real forgeries), not more extreme
+than the most extreme honest region in the corpus (strong bound ≈ 20).
+
 ### Adjudicator (`agents/adjudicator.py`) — 🔒 starved
 Receives `cards: list[EvidenceCard]` and a `Calibration`. **Never receives an
-image.** Requires corroboration from **two independent probe families**
-(`compression`, `texture`, `duplication`, `typography` — grouped so that
-`hf_ratio` and `flat_pixel_frac`, which measure the same underlying texture
-statistic, cannot satisfy the rule by themselves) before raising a
-`tamper_detected`-track claim. A single-family signal may still raise a claim
-if it is `SOLO_SEVERITY` calibrated units past the bound — set high on
-purpose, since one probe alone should almost never be enough. Verdicts:
+image.** It re-derives exceedance from the raw statistics on each card (the
+Prober's `*_exceeds` flags are display hints; the agent with answer authority
+does not inherit another agent's thresholding) and raises a claim when:
+
+- **two independent probe families** cross the screen tier on the same region
+  (`compression`, `texture`, `duplication`, `typography` — grouped so that
+  `hf_ratio` and `flat_pixel_frac`, which measure the same underlying texture
+  statistic, cannot satisfy the rule by themselves), or
+- **one family crosses the strong tier** (beyond any authentic document's
+  worst region — no corroboration needed), or
+- the **cross-field arithmetic fails AND a pixel anomaly sits on the total
+  field itself**, or
+- a region is a **near-identical duplicate** of another region ≥40px away.
+
+Each claim records which tier each signal crossed (`bond_detail.tiers`), so
+the Verifier re-tests at the same bar. Verdicts:
 
 - `tamper_detected` — at least one claim, later bonded by the Verifier
 - `authentic` — regions were probed and none crossed calibration
@@ -164,8 +190,8 @@ purpose, since one probe alone should almost never be enough. Verdicts:
 A bond holds only if all four pass:
 
 1. **Provenance** — the cited card's crop still hashes to its recorded value.
-2. **Reproduction** — the flagged statistic is recomputed from scratch on the crop on disk and still exceeds the calibrated bound.
-3. **Blank control** — the same probe on a flat grey patch of identical size must *not* reproduce the finding.
+2. **Reproduction** — the flagged statistic is recomputed from scratch on the crop on disk and still exceeds the calibrated bound *at the tier the claim used* (`bond_detail.tiers`).
+3. **Blank control** — the same probe on a flat grey patch of identical size must *not* reproduce the finding. Exempt: relative metrics that need peer regions (`ela_z`, `hf_ratio`) and `flat_pixel_frac`, which a synthetic grey patch trips by construction — flatness is controlled by the shuffle instead, where the decoys are real text regions that must NOT be flat.
 4. **Shuffle control** — the same probe on several other text regions of *this same document* must not reproduce it in more than `SHUFFLE_TOLERANCE` of them. Decoys are drawn from other OCR-detected text regions, not random coordinates — a patch of blank margin fails every probe trivially, so a control built on it passes by construction and tests nothing.
 
 ### Orchestrator (`orchestrator.py`)

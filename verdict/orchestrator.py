@@ -27,7 +27,7 @@ from .types import Verdict
 
 class Orchestrator:
     def __init__(self, customer_id: str = "default", ledger: Ledger | None = None,
-                 budget: float = 90.0, run_controls: bool = True,
+                 budget: float = 150.0, run_controls: bool = True,
                  use_probes: bool = True, calibration=None):
         self.customer_id = customer_id
         self.cal = calibration if calibration is not None else cal_mod.load(customer_id)

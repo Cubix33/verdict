@@ -7,7 +7,10 @@
       "scale": 5.54505,
       "hi": 20.35282,
       "observed_max": 20.174,
-      "lo": -Infinity,
+      "lo": null,
+      "screen_hi": 6.266,
+      "screen_lo": null,
+      "pool_n": 1026,
       "n": 12
     },
     "hf_ratio": {
@@ -16,27 +19,39 @@
       "observed_max": 4.1001,
       "lo": -0.03671,
       "observed_min": 0.0003,
+      "screen_hi": 1.8681,
+      "screen_lo": 0.087,
+      "pool_n": 1026,
       "n": 12
     },
     "flat_pixel_frac": {
       "scale": 0.18098,
       "hi": 0.68552,
       "observed_max": 0.6662,
-      "lo": -Infinity,
+      "lo": null,
+      "screen_hi": 0.2576,
+      "screen_lo": null,
+      "pool_n": 1026,
       "n": 12
     },
     "dup_score": {
       "scale": 0.03836,
       "hi": 0.9928,
       "observed_max": 0.9947,
-      "lo": -Infinity,
+      "lo": null,
+      "screen_hi": 0.91268,
+      "screen_lo": null,
+      "pool_n": 1004,
       "n": 12
     },
     "grid_ratio": {
       "scale": 0.18333,
-      "hi": Infinity,
+      "hi": null,
       "lo": 0.21967,
       "observed_min": 0.202,
+      "screen_hi": null,
+      "screen_lo": 0.65076,
+      "pool_n": 507,
       "n": 11
     },
     "stroke_ratio": {
@@ -45,13 +60,19 @@
       "observed_max": 2.496,
       "lo": 0.22436,
       "observed_min": 0.193,
+      "screen_hi": 1.21748,
+      "screen_lo": 0.80092,
+      "pool_n": 849,
       "n": 12
     },
     "baseline_z": {
       "scale": 6.15007,
       "hi": 25.41385,
       "observed_max": 25.0,
-      "lo": -Infinity,
+      "lo": null,
+      "screen_hi": 8.3418,
+      "screen_lo": null,
+      "pool_n": 849,
       "n": 12
     }
   },
