@@ -1,134 +1,173 @@
 # VERDICT — Evidence-Bonded Reasoning
-### *An AI Auditor for Images Submitted as Proof. It cannot make a claim it cannot prove.*
 
-**Theme: AI Vision · 100% Software · Active Agent Workspace**
+### An AI auditor for images submitted as proof. It cannot make a claim it cannot prove.
 
----
-
-## 1. The Core Philosophy
-Every AI verification system today answers the question **"is this fake?"** and gives you a confidence score you cannot verify. 
-
-**VERDICT** does something different: a team of specialized agents must spend a budget on deterministic forensic probes to earn evidence. Every claim must cite a content-hashed **Evidence Card** (isolated pixel crop), and a separate **Verifier** re-runs the claim against *only* its cited evidence with everything else blacked out. If the claim doesn't survive in isolation, the bond breaks and the claim is void — *even if the final answer would have been correct.*
-
-The reasoning happens in **evidence acquisition**, not in token generation. Nothing is approved without a cryptographic receipt.
+> **Status: rebuilt after a critical bug.** The pipeline as first shipped
+> called every image tampered — authentic receipts included — with a
+> measured **100% false-positive rate**. This branch is a full diagnosis and
+> rebuild of the forensic core. See [What was broken](#what-was-broken-and-why)
+> and [docs/PLAN.md §13](docs/PLAN.md) for the numbers behind that claim, and
+> the [open issue](../../issues) for what's still unfinished.
 
 ---
 
-## 2. Agent Workforce Architecture
-The system decouples planning from judgment using a strict **separation of powers**:
+## 1. The idea, in one paragraph
+
+Every AI document-fraud detector answers *"is this fake?"* with a confidence
+score you cannot check. VERDICT answers differently: a team of agents must
+**spend a budget on deterministic forensic probes to earn evidence**, every
+claim must **cite** the exact pixels it came from (content-hashed), and a
+separate **Verifier** re-derives each claim from *only* its cited evidence —
+with everything else blacked out — before the claim counts. If the claim
+doesn't survive in isolation, the bond breaks and the claim is struck, **even
+if it happened to be right**. Full rationale, worked examples, and prior-art
+comparison: [`docs/idea.md`](docs/idea.md).
+
+## 2. Why this is a different shape of system, not just a bigger model
+
+Three architectural choices carry the whole design. Each answers a specific,
+named failure mode of ordinary VLM-based fraud detection — see
+[`docs/idea.md` §3](docs/idea.md) for the full argument.
+
+| Mechanism | What it does | Failure mode it closes |
+|---|---|---|
+| **Perceptual starvation** | The Adjudicator (the agent with answer authority) never receives the image — not downsampled, not once. It reasons only over a text manifest of evidence cards the Prober had to spend budget to acquire. | *Lazy perception*: a model that can succeed without looking never learns to look. |
+| **Evidence bonds** | Every claim cites the SHA-256 of the exact crop it came from. A second, independent agent re-derives the claim from *only* the cited crop, then swaps it for a random same-size region (**shuffle control**) — if the finding survives, it wasn't using its evidence. | *Right answer, wrong evidence* — and lazy perception a second time, caught adversarially. |
+| **N=10 self-calibration** | Every threshold is measured from documents *this deployment* certifies as authentic, never shipped as a constant. | A fixed threshold tuned on someone else's dataset does not transfer — this is the exact mechanism whose absence caused the bug this branch fixes. |
+
+The probes themselves — ELA, JPEG quantization tables, noise residuals,
+copy-move, typography — are decades-old, well-understood forensics. **The
+novelty claimed here is the architecture around them** (starvation, bonds,
+calibration), not the probes. See [`docs/idea.md` §15](docs/idea.md) for the
+prior-art comparison this project holds itself to.
+
+## 3. Architecture
 
 ```mermaid
 flowchart TD
-    IN["Uploaded Image / Claim"] --> TRIAGE
-    
-    TRIAGE["<b>1. TRIAGE AGENT</b><br/>deterministic checks<br/>exif · phash · cross-field math<br/>Resolves ~40% cases at 0 VLM cost"]
-    TRIAGE -->|"escalate"| PROBER
-    
-    PROBER["<b>2. PROBER AGENT</b><br/>Runs OCR Bbox detection<br/>Saves lossless crop maps<br/>Creates content-addressed cards"]
-    PROBER -->|"Registers"| LEDGER[("<b>EVIDENCE LEDGER</b><br/>Immutable SQLite store<br/>Crops & SHA-256 addresses")]
-    
-    LEDGER -->|"Text Manifest ONLY<br/>(LOCKED image visibility)"| ADJ
-    
-    ADJ["<b>3. ADJUDICATOR AGENT (Starved)</b><br/>Formulates claims<br/>Bonds claims to card hashes"]
-    ADJ -->|"Bonded Claims"| VER
-    
-    VER["<b>4. VERIFIER AGENT (Skeptic)</b><br/>Context-free review<br/>Re-runs claim on isolated crops<br/>Applies blank & shuffle controls"]
-    
-    VER -->|"holds"| ACCEPT["VERDICT VALIDATED"]
-    VER -->|"broken"| REJECT["BOND BROKEN / REJECTED"]
+    IN["Image + claim"] --> TRIAGE
+
+    TRIAGE["<b>1. TRIAGE</b><br/>zero model/VLM cost<br/>exif · phash · cross-field arithmetic<br/>raises risk, never accuses"]
+    TRIAGE --> PROBER
+
+    PROBER["<b>2. PROBER</b><br/>plans, cannot decide<br/>selects regions from OCR AND raw pixel outliers<br/>runs ELA · noise · copy-move · typography · grid"]
+    PROBER -->|registers| LEDGER[("<b>EVIDENCE LEDGER</b><br/>SQLite, content-addressed<br/>scoped per claim_id")]
+
+    LEDGER -->|"text manifest ONLY<br/>image visibility LOCKED"| ADJ
+
+    ADJ["<b>3. ADJUDICATOR</b><br/>🔒 starved — never sees the image<br/>needs 2 independent probe families<br/>to raise a claim"]
+    ADJ -->|bonded claims| VER
+
+    VER["<b>4. VERIFIER</b><br/>🔒 skeptic, shares no state with the Adjudicator<br/>re-derives each claim from its cited crop<br/>blank control + shuffle control"]
+
+    CAL[("<b>CALIBRATOR</b><br/>N authentic docs →<br/>per-metric thresholds")] -.thresholds.-> PROBER
+    CAL -.-> ADJ
+    CAL -.-> VER
+
+    VER -->|bond holds| ACCEPT["tamper_detected"]
+    VER -->|bond breaks| REJECT["undetermined<br/>(accusation struck)"]
+    ADJ -->|nothing exceeded calibration| CLEAN["authentic"]
 ```
 
----
+**Separation of powers** — this is the whole security model, not a nicety:
+- Triage can raise risk, but spends nothing and decides nothing.
+- The Prober plans and spends a budget, but has no authority to decide.
+- The Adjudicator decides, but never sees a pixel — only what the Prober paid to describe.
+- The Verifier validates, but shares no context with the Adjudicator and can strike its claims.
 
-## 3. Step-by-Step Pipeline: What Happens Under the Hood
+No single agent can produce a claim, its justification, *and* its validation.
 
-### Step 1: Upload & Triage
-1. You select or upload an image (e.g. `data/example.png`).
-2. The **Triage Agent** is invoked immediately. It does not use any expensive LLMs. It runs:
-   * **EXIF Audit**: Parses metadata to check if editing tools (like Snapseed, Photoshop) modified the file, or if the metadata is completely stripped (suspicious for screenshots).
-   * **Perceptual Hashing (pHash/dHash)**: Computes a fingerprint to check if this exact image was previously submitted for another claim.
-   * **Cross-Field Arithmetic**: Uses OCR to locate all numbers, sums them up, and compares them against the largest number (assumed Total). If the math doesn't add up (a typical human forger changes the total but forgets to change the itemized list), it escalates.
-3. *Your run result:* Triage escalated because the upload `data/example.png` had no EXIF data (`missing_exif`).
+## 4. Repository layout
 
-### Step 2: Probing
-1. The **Prober Agent** takes the escalated image.
-2. It detects regions of interest (where numbers and totals are located) using OCR bounding boxes.
-3. It takes **native-resolution, lossless crops** of these critical sections and saves them to `data/crops/` as PNG files.
-4. Each crop is content-hashed (SHA-256) and registered in the database as an **Evidence Card**.
-5. *Your run result:* Prober isolated the regions of interest and created **3 distinct Evidence Cards** in the database.
-
-### Step 3: Adjudication
-1. The **Adjudicator Agent** is initiated.
-2. Under "Perceptual Starvation", this agent is **prevented from seeing the full image**. It is only given a text manifest of the Evidence Cards generated by the Prober (including their layout, bounding box size, and metadata metrics).
-3. If ELA (Error Level Analysis) residuals or OCR baseline alignments exceed calibration tolerances, it outputs a list of claims.
-4. Each claim is **bonded** directly to the card IDs it originated from.
-5. *Your run result:* The Adjudicator generated **2 Claims** accusing the receipt of being modified.
-
-### Step 4: Verification
-1. The **Verifier Agent** is invoked to double-check the Adjudicator.
-2. It loads the exact crops bonded to the claims and isolates them (making the rest of the image black).
-3. It re-runs the checks. If the verifier cannot reproduce the discrepancy from the isolated crop, the **bond breaks**.
-4. **Shuffle Controls** are applied: it swaps the crop with a random crop of the same size. If the checks still pass, it proves the model was guessing, and the bond breaks.
-5. *Your run result:* **0 bonds HOLD, 2 bonds BROKEN**. The Verifier determined that the crop contents did not support the claims or failed the controls, demonstrating the safety mechanism in action to prevent false fraud accusations!
-
----
-<img width="1917" height="1032" alt="Screenshot 2026-08-01 235443" src="https://github.com/user-attachments/assets/6d344769-b896-4466-a0b1-1ade894217ff" />
-
-## 4. Project Directory Structure
 ```
 verdict/
-├── README.md               # This comprehensive guide
-├── requirements.txt        # Python dependency manifest
-├── venv/                   # Python virtual environment
-├── verdict/                # Core agentic backend
-│   ├── types.py            # EvidenceCard, Claim, Verdict schemas
-│   ├── ledger.py           # Immutable SQLite + Crop ledger database
+├── README.md                    this file
+├── requirements.txt
+├── docs/
+│   ├── idea.md                  full concept, findings, worked examples, prior art
+│   ├── PLAN.md                  the original build plan this rebuild follows
+│   ├── RUN_GUIDE.md             narrated walkthrough of one pipeline run
+│   ├── ARCHITECTURE.md          detailed HLD/LLD: data flow, schemas, bond protocol
+│   └── test-images/             curated authentic + forged samples, see its README
+├── aidlc-docs/
+│   └── efforts/001-fix-false-positive-pipeline/   AI-DLC record of this session
+│       ├── effort-state.md
+│       ├── requirements-delta.md
+│       └── root-cause-analysis.md
+├── tools/
+│   ├── make_corpus.py           generates labelled forgeries from real receipts
+│   ├── probe_separation.py      PLAN.md §3 acceptance gate (probe AUC on forged vs authentic)
+│   └── evaluate.py              end-to-end pipeline evaluation (F1, false-accusation rate, bond metrics)
+├── verdict/
+│   ├── types.py                 EvidenceCard, Claim, Verdict
+│   ├── ledger.py                claim-scoped, content-addressed SQLite store
+│   ├── calibrate.py             Mechanism 3 — per-deployment thresholds, no shipped constants
+│   ├── orchestrator.py          wires the four agents, enforces separation of powers
 │   ├── agents/
-│   │   ├── triage.py       # Triage worker (EXIF, phash, math checks)
-│   │   ├── prober.py       # Probing worker (Cropper & card generator)
-│   │   ├── adjudicator.py  # Adjudication worker (Issues claims)
-│   │   └── verifier.py     # Verification worker (Context-free skeptic)
+│   │   ├── triage.py            free probes only; raises risk, never accuses
+│   │   ├── prober.py            selects regions, runs the forensic suite, spends budget
+│   │   ├── adjudicator.py       🔒 starved — text manifest only
+│   │   └── verifier.py          🔒 independent re-derivation + blank/shuffle controls
 │   └── probes/
-│       ├── cheap.py        # EXIF, dHash, Math OCR
-│       ├── ela.py          # Error Level Analysis compression residuals
-│       ├── dct_quant.py    # JPEG quantization table extraction
-│       ├── noise.py        # High-pass sensor noise variance ratio
-│       └── typography.py   # Font baseline jitter & stroke-width estimation
-├── dashboard/
-│   ├── app.py              # FastAPI server serving API endpoints & static crops
-│   └── frontend/           # React dashboard UI
-└── data/
-    ├── example.png         # Main target image (uploaded)
-    ├── ledger.db           # SQLite database tracking claims & cards
-    └── crops/              # PNG directory containing cropped Evidence Cards
+│       ├── ocr.py               shared OCR layer: amount parsing, row grouping, text regions
+│       ├── cheap.py             EXIF audit, perceptual hash, cross-field arithmetic
+│       ├── compression.py       multi-scale ELA, JPEG ghost, quantization tables, block-grid
+│       ├── noise.py             high-pass residual, smoothness/flatness (anti-fill, anti-diffusion)
+│       ├── typography.py        row-relative stroke width and baseline offset
+│       ├── copymove.py          ORB self-matching + targeted template-match duplication score
+│       └── geometric.py         native-resolution zoom, region isolation, shuffle sampling
+├── dashboard/                    FastAPI + React demo UI (staged pipeline visualisation)
+└── data/                         runtime output: ledger.db, crops/ (gitignored)
 ```
 
----
+## 5. Quick start
 
-## 5. Quick Start & Execution
-
-### Prerequisites
-1. **Python 3.11+**
-2. **Tesseract OCR Engine** (Must be installed on the machine)
-
-### 1. Run the Backend FastAPI Server
-Activate the virtual environment and launch the server:
 ```powershell
-# In the root D:\verdict directory
+python -m venv venv
 .\venv\Scripts\Activate.ps1
-python dashboard/app.py
-```
-*App will run on `http://localhost:8000`*
+pip install -r requirements.txt
+# Tesseract OCR must be installed separately: https://github.com/tesseract-ocr/tesseract
 
-### 2. Run the React Frontend Dashboard
-In a separate terminal window:
+# Analyse one image with the calibration profile shipped for the demo corpus
+python -m verdict.orchestrator docs/test-images/forged/002__retype_amount.jpg --customer sroie
+
+# Or the full staged dashboard
+python dashboard/app.py                 # backend on :8000
+cd dashboard/frontend && npm install && npm start   # frontend on :3000
+```
+
+VERDICT ships with **no default thresholds** — that's Mechanism 3, not an
+oversight. To run on your own documents, calibrate first:
+
 ```powershell
-cd dashboard/frontend
-npm install
-npm start
+python -m verdict.calibrate path\to\authentic_documents --customer my-deployment
+python -m verdict.orchestrator path\to\image.jpg --customer my-deployment
 ```
-*App will launch on `http://localhost:3000`*
 
-## 6. Team
+## 6. What was broken, and why
+
+This branch started from a bug report: *"it says false [tampered] to even
+correct [authentic] ones."* Reproducing it against 13 real, unmodified
+receipts and camera photos confirmed **13/13 → `tamper_detected`**, plus a
+crash on any real camera photo. Root causes, all fixed in this branch:
+
+1. **No calibration layer existed.** Thresholds were literals — `abs(delta) > 0.5`, `z > 3.0` — never measured against anything. Calibrating on 12 real authentic receipts shows the worst-scoring region on an honest document routinely reaches an ELA z-score of 15–20 (a receipt has 50–100 text regions, and the maximum of that many draws is naturally large); the shipped `z > 3.0` was far inside the noise floor of an honest document, not past it.
+2. **The arithmetic check accused every receipt.** It took the largest number anywhere on the page as "the total" and subtracted every other number — dates, phone numbers, quantities included — then flagged any non-zero remainder. It now requires a line whose *label* says total and refuses to answer (`insufficient_structure`) rather than guess.
+3. **Evidence leaked across images.** The ledger cache was one process-global dict keyed only by card id, never by claim. Analysing image #10 in a batch adjudicated over images #1–#9's evidence too — a photo of a mountain in the reproduction run inherited 12 tamper claims from other people's receipts.
+4. **The forensic probes were never called.** `ela.py`, `noise.py`, `dct_quant.py`, `typography.py` existed but nothing in `prober.py` invoked them — the Adjudicator's ELA branch was dead code. The system issued verdicts with no forensic evidence behind them.
+5. **`piexif` bytes crashed `json.dumps`.** Any real camera photo (as opposed to a PNG screenshot) crashed the pipeline outright before a verdict was ever produced.
+6. **The Verifier's bond tests could not fail.** The perceptual-hash check compared a dHash against a SHA-256 prefix and then wrote `or True`; the EXIF check's pass condition was inverted; the cross-field check only asked "does this crop contain any digit." Bonds held and broke for reasons unrelated to the claims they were meant to test.
+
+Full root-cause writeup with line-level references:
+[`aidlc-docs/efforts/001-fix-false-positive-pipeline/root-cause-analysis.md`](aidlc-docs/efforts/001-fix-false-positive-pipeline/root-cause-analysis.md).
+
+## 7. Current status and honest limitations
+
+- **False-accusation rate is fixed and verified**: authentic documents (including ones outside the calibration set) now return `authentic`, not `tamper_detected`, across every manual and scripted check run in this branch.
+- **Detection recall needs tuning.** With calibration held to a small (12-document) authentic sample, some forgery modes now under-trigger — the system is conservative rather than trigger-happy, but recall has not been measured on a full held-out corpus. This is the main open item; see the issue tracker.
+- **The VLM/adjudication-language layer in `docs/PLAN.md` §5 is not implemented.** The Adjudicator here reasons over calibrated statistics directly (no LLM call), which is a stronger, cheaper, fully deterministic MVP of Mechanism 1, but the natural-language claim generation described in the plan is future work.
+- **JSON has a known Python-ism**: calibration files can contain `Infinity`/`-Infinity` for one-sided thresholds, which `json.dumps`/`json.loads` in Python round-trip fine but a strict JSON parser (e.g. in the React dashboard, or `jq`) will reject. Tracked in the issue.
+
+## 8. Team
+
 Harshdip Saha and Anshika Singh
-
