@@ -1,5 +1,7 @@
 # VERDICT — Evidence-Bonded Reasoning
 
+**Status:** WINNER OF THE HACKATHON AI ARENA -TOP 50✨
+
 ### An AI auditor for images submitted as proof. It cannot make a claim it cannot prove.
 
 > **Status: rebuilt after a critical bug.** The pipeline as first shipped
